@@ -33,14 +33,20 @@ GLOBAL = re.compile(
 RULE_KEYS = ("denied", "gated", "emulator_only")
 
 
-def load_rules(cwd):
-    """Project and personal rules from .devlease.json, concatenated.
+def config_home():
+    return os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 
-    A missing, malformed, or partly invalid file costs you those rules and
-    nothing else — the built-in gating still applies.
+
+def load_rules(cwd):
+    """Project and personal rules, concatenated.
+
+    Project rules live in <cwd>/.devlease.json so they travel with the repo;
+    personal ones in $XDG_CONFIG_HOME/devlease/config.json. A missing,
+    malformed, or partly invalid file costs you those rules and nothing else —
+    the built-in gating still applies.
     """
     rules = {key: [] for key in RULE_KEYS}
-    paths = [os.path.expanduser("~/.devlease.json")]
+    paths = [os.path.join(config_home(), "devlease", "config.json")]
     if cwd:
         paths.insert(0, os.path.join(cwd, ".devlease.json"))
     for path in dict.fromkeys(paths):
@@ -52,15 +58,17 @@ def load_rules(cwd):
         for key in RULE_KEYS:
             for pattern in data.get(key) or []:
                 try:
-                    rules[key].append(re.compile(pattern))
+                    rules[key].append((re.compile(pattern), path))
                 except (re.error, TypeError):
                     print(f"devlease: bad {key} pattern {pattern!r} in {path}",
                           file=sys.stderr)
     return rules
 
 
-def matches(patterns, cmd):
-    return next((p.pattern for p in patterns if p.search(cmd)), None)
+def matches(rules, cmd):
+    """First matching rule as "<pattern> in <config file>", or None."""
+    return next((f"{p.pattern} in {path}" for p, path in rules if p.search(cmd)),
+                None)
 
 
 ADB = re.compile(r"(?:^|[\s/\"'])adb(?:\s|$)")
@@ -189,9 +197,9 @@ def gate(cmd, cwd):
     hit = matches(rules["denied"], cmd)
     if hit:
         return "deny", (
-            f"Refused by a .devlease.json `denied` rule ({hit}). This command is "
-            "configured as never-allowed here, usually because it disrupts other "
-            "agents. Ask the user to run it themselves if it is genuinely needed."
+            f"Refused by a `denied` rule: {hit}. This command is configured as "
+            "never-allowed here, usually because it disrupts other agents. Ask the "
+            "user to run it themselves if it is genuinely needed."
         )
     if GLOBAL.search(cmd):
         return "deny", (
@@ -217,9 +225,9 @@ def gate(cmd, cwd):
         )
     if emulator_only and not serial.startswith("emulator-"):
         return "deny", (
-            f"{serial} is a physical device, and a .devlease.json `emulator_only` "
-            f"rule ({emulator_only}) restricts this command to emulators. Target an "
-            "emulator instead — `adb devices` lists them as emulator-<port>."
+            f"{serial} is a physical device, and an `emulator_only` rule restricts "
+            f"this command to emulators: {emulator_only}. Target an emulator instead "
+            "— `adb devices` lists them as emulator-<port>."
         )
 
     ok, message = acquire(serial, cwd)

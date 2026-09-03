@@ -5,8 +5,8 @@ DEVLEASE_DIR="$(mktemp -d)"
 export DEVLEASE_DIR
 export DEVLEASE_WAIT=0
 export DEVLEASE_DEVICES="emulator-5554 emulator-5556 R58MSAMPLE01"
-# Without this the suite picks up the personal ~/.devlease.json of whoever runs it and fails
-# against their personal rules. Tests that need a home config set HOME themselves.
+# Without this the suite picks up the personal config of whoever runs it and fails
+# against their rules. Tests that need a personal config set HOME themselves.
 HOME="$(mktemp -d)"
 export HOME
 trap 'rm -rf "$DEVLEASE_DIR" "$HOME"' EXIT
@@ -171,7 +171,10 @@ cat > "$PROJ/.devlease.json" <<'JSON'
  "gated": ["flutter\\s+run"],
  "emulator_only": ["flutter\\s+drive"]}
 JSON
-echo '{"denied": ["wipe-the-fleet"]}' > "$FAKEHOME/.devlease.json"
+mkdir -p "$FAKEHOME/.config/devlease"
+echo '{"denied": ["wipe-the-fleet"]}' > "$FAKEHOME/.config/devlease/config.json"
+XDGDIR="$(mktemp -d)"; mkdir -p "$XDGDIR/devlease"
+echo '{"denied": ["scuttle-the-fleet"]}' > "$XDGDIR/devlease/config.json"
 
 reset
 check "config denied pattern is refused" \
@@ -191,10 +194,18 @@ check "a project without config is unaffected" \
 [ -d "$DEVLEASE_DIR/emulator-5554" ] && { fail=$((fail+1)); echo "FAIL: gated an unconfigured project"; } || pass=$((pass+1))
 
 reset
-check "home config applies anywhere" \
+check "personal config in ~/.config applies anywhere" \
   "$(hook_cwd A /tmp 'wipe-the-fleet --yes' HOME="$FAKEHOME")" deny
-check "project and home rules both apply" \
+check "the refusal names the file the rule came from" \
+  "$(hook_cwd A /tmp 'wipe-the-fleet --yes' HOME="$FAKEHOME")" deny "config/devlease/config.json"
+check "a project rule names the project file, not the personal one" \
+  "$(hook_cwd A "$PROJ" './scripts/ci-only.sh' HOME="$FAKEHOME")" deny "$PROJ/.devlease.json"
+check "project and personal rules both apply" \
   "$(hook_cwd A "$PROJ" './scripts/ci-only.sh' HOME="$FAKEHOME")" deny
+check "XDG_CONFIG_HOME is honoured over ~/.config" \
+  "$(hook_cwd A /tmp 'scuttle-the-fleet --yes' HOME="$FAKEHOME" XDG_CONFIG_HOME="$XDGDIR")" deny
+check "XDG_CONFIG_HOME replaces ~/.config rather than adding to it" \
+  "$(hook_cwd A /tmp 'wipe-the-fleet --yes' HOME="$FAKEHOME" XDG_CONFIG_HOME="$XDGDIR")" allow
 
 # A project-specific Gradle task, gated and emulator-restricted by config alone.
 cat > "$PROJ/.devlease.json" <<'JSON'
@@ -211,7 +222,7 @@ check "config blocks that task on a physical device" \
 echo 'not json {{{' > "$PROJ/.devlease.json"
 check "malformed config does not break the gate" \
   "$(hook_cwd A "$PROJ" 'adb -s emulator-5554 shell ls')" allow
-rm -rf "$PROJ" "$FAKEHOME"
+rm -rf "$PROJ" "$FAKEHOME" "$XDGDIR"
 
 echo "---"
 echo "passed: $pass  failed: $fail"

@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy to ~/.config/devlease/config.json (personal, or $XDG_CONFIG_HOME/devlease/config.json) or <repo>/.devlease.json (project). Both are read and their rules concatenated. Values are Python regexes matched against the whole command string.",
+
+  "denied": [
+    "scripts/reset-device-farm\\.sh"
+  ],
+
+  "gated": [
+    "flutter\\s+(run|drive|install)",
+    "gradlew\\b[^|;&]*?:?e2e:run\\w*Tests\\b"
+  ],
+
+  "emulator_only": [
+    "gradlew\\b[^|;&]*?:?e2e:run\\w*Tests\\b"
+  ]
+}

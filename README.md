@@ -103,8 +103,14 @@ devlease steal <serial>    # break a stuck lease
 
 Some rules only make sense in one repo: a script that must never run locally, a
 custom Gradle task that drives a device, a test suite that must stay off physical
-hardware. Put those in `.devlease.json`, either in the repo or at `~/.devlease.json`.
-Both are read and their rules concatenated.
+hardware. Those go in `<repo>/.devlease.json`, so they travel with the checkout
+and apply to everyone working in it.
+
+Rules that are yours rather than the project's go in
+`~/.config/devlease/config.json` (or `$XDG_CONFIG_HOME/devlease/config.json`,
+which replaces that location rather than adding to it).
+
+Both files are read and their rules concatenated.
 
 ```json
 {
