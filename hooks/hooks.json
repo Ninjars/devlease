@@ -1,0 +1,17 @@
+{
+  "description": "devlease — leases each Android device to one agent at a time",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__.*ctx_execute|mcp__.*ctx_execute_file|mcp__.*ctx_batch_execute",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/devlease\" hook",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

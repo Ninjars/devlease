@@ -1,0 +1,22 @@
+{
+  "name": "devlease",
+  "version": "0.1.0",
+  "description": "Leases each Android device and emulator to one agent at a time. A PreToolUse hook gates adb, Gradle install and instrumentation tasks, Maestro, and the android CLI, so concurrent agents cannot install over each other's build or drive the same UI.",
+  "author": {
+    "name": "ubuntudroid",
+    "url": "https://github.com/ubuntudroid"
+  },
+  "homepage": "https://github.com/ubuntudroid/devlease#readme",
+  "repository": "https://github.com/ubuntudroid/devlease",
+  "license": "MIT",
+  "keywords": [
+    "android",
+    "adb",
+    "emulator",
+    "maestro",
+    "gradle",
+    "hooks",
+    "multi-agent",
+    "concurrency"
+  ]
+}

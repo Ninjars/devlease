@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Serialize Android device access across concurrent agents.
+
+Hook mode reads a PreToolUse payload on stdin and allows, warns, or denies.
+CLI mode (list/release/steal) is for agents and for you.
+"""
+import json
+import os
+import re
+import shutil
+import sys
+import time
+
+DIR = os.path.expanduser(os.environ.get("DEVLEASE_DIR", "~/.android-devlease"))
+# ponytail: idle TTL only, no in-flight tracking. PostToolUse fires when the tool
+# call returns, which for a backgrounded Gradle run is long before the suite ends,
+# so it cannot mark a run's real end. The TTL must therefore exceed the longest
+# single command (a full Maestro suite). `devlease steal` covers a stuck lease.
+TTL = int(os.environ.get("DEVLEASE_TTL", 3600))
+WAIT = int(os.environ.get("DEVLEASE_WAIT", 50))
+
+ME = os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
+
+# adb ops that reconfigure the whole adb server or reboot a device: one agent
+# running these breaks every other agent's session, so no lease can justify them.
+# Anchored at the subcommand position (right after `adb`, past an optional -s
+# <serial>). Further along, these same tokens are ordinary arguments: `install -d`
+# is allow-downgrade, `am start -e` is a string extra, `dumpsys usb` is a query.
+GLOBAL = re.compile(
+    r"(?:^|[\s/\"'])adb(?:\s+-s\s+\S+)?\s+"
+    r"(?:-[de]|kill-server|start-server|root|unroot|reboot|usb|tcpip|disconnect)(?:\s|$)"
+)
+RULE_KEYS = ("denied", "gated", "emulator_only")
+
+
+def load_rules(cwd):
+    """Project and personal rules from .devlease.json, concatenated.
+
+    A missing, malformed, or partly invalid file costs you those rules and
+    nothing else — the built-in gating still applies.
+    """
+    rules = {key: [] for key in RULE_KEYS}
+    paths = [os.path.expanduser("~/.devlease.json")]
+    if cwd:
+        paths.insert(0, os.path.join(cwd, ".devlease.json"))
+    for path in dict.fromkeys(paths):
+        try:
+            with open(path) as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+        for key in RULE_KEYS:
+            for pattern in data.get(key) or []:
+                try:
+                    rules[key].append(re.compile(pattern))
+                except (re.error, TypeError):
+                    print(f"devlease: bad {key} pattern {pattern!r} in {path}",
+                          file=sys.stderr)
+    return rules
+
+
+def matches(patterns, cmd):
+    return next((p.pattern for p in patterns if p.search(cmd)), None)
+
+
+ADB = re.compile(r"(?:^|[\s/\"'])adb(?:\s|$)")
+ADB_LOCAL = re.compile(r"(?:^|[\s/\"'])adb\s+(?:-s\s+\S+\s+)?(?:devices|version|help)\b")
+# Anchored at the start of the task name: `assembleDebugAndroidTest` and
+# `compileDebugAndroidTestKotlin` only build the test APK and never touch a device.
+GRADLE_DEVICE = re.compile(r"gradlew\b[^|;&]*?(?:^|[\s:])(?:install|uninstall|connected)\w*")
+MAESTRO = re.compile(r"(?:^|[\s/\"'])maestro(?:\s|$)")
+MAESTRO_LOCAL = re.compile(
+    r"(?:^|[\s/\"'])maestro\s+(?:start-device|download-samples|login|logout|upload|cloud)\b"
+)
+ANDROID_CLI = re.compile(r"(?:^|[\s/\"'])android\s+(?:install|run|screen|layout)\b")
+
+SERIAL_ADB = re.compile(r"(?:^|\s)-s\s+(\S+)")
+SERIAL_GRADLE = re.compile(r"-Pdevice=(\S+)")
+SERIAL_FLAG = re.compile(r"--device[= ](\S+)")
+# The hook inherits the agent's env, but not a serial assigned inline on the command.
+SERIAL_INLINE = re.compile(r"\bANDROID_SERIAL=(\S+)")
+
+
+def attached():
+    override = os.environ.get("DEVLEASE_DEVICES")
+    if override is not None:
+        return override.split()
+    try:
+        import subprocess
+        out = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    return [l.split()[0] for l in out.splitlines()[1:] if "\tdevice" in l]
+
+
+def classify(cmd):
+    """Return the set of device-touching command kinds in cmd."""
+    kinds = set()
+    if ADB.search(cmd) and not ADB_LOCAL.search(cmd):
+        kinds.add("adb")
+    if GRADLE_DEVICE.search(cmd):
+        kinds.add("gradle")
+    if MAESTRO.search(cmd) and not MAESTRO_LOCAL.search(cmd):
+        kinds.add("maestro")
+    if ANDROID_CLI.search(cmd):
+        kinds.add("android")
+    return kinds
+
+
+def resolve(cmd, kinds):
+    for pat in (SERIAL_GRADLE, SERIAL_FLAG, SERIAL_INLINE):
+        m = pat.search(cmd)
+        if m:
+            return m.group(1)
+    if "adb" in kinds:
+        m = SERIAL_ADB.search(cmd)
+        if m:
+            return m.group(1)
+    if os.environ.get("ANDROID_SERIAL"):
+        return os.environ["ANDROID_SERIAL"]
+    devices = attached()
+    return devices[0] if len(devices) == 1 else None
+
+
+def age(path):
+    return time.time() - os.stat(path).st_mtime
+
+
+def acquire(serial, cwd):
+    """Return (ok, message). message is a warning on success, a reason on failure."""
+    os.makedirs(DIR, exist_ok=True)
+    lease = os.path.join(DIR, serial)
+    stamp = lease + ".last"
+    deadline = time.time() + WAIT
+    while True:
+        try:
+            os.mkdir(lease)
+        except FileExistsError:
+            try:
+                owner = open(os.path.join(lease, "owner")).read().strip()
+                held = open(os.path.join(lease, "since")).read().strip()
+            except OSError:
+                owner, held = "", ""
+            if owner == ME:
+                os.utime(lease, None)
+                return True, None
+            if age(lease) > TTL:
+                shutil.rmtree(lease, ignore_errors=True)
+                continue
+            if time.time() >= deadline:
+                where = ""
+                try:
+                    where = " in " + open(os.path.join(lease, "cwd")).read().strip()
+                except OSError:
+                    pass
+                mins = int(age(lease) // 60)
+                return False, (
+                    f"{serial} is held by another agent (session {owner[:8]}{where}), "
+                    f"idle {mins}m, since {held}. Run `devlease list` to see all leases. "
+                    "Work on something else and retry, or ask the user to run "
+                    f"`devlease steal {serial}`."
+                )
+            time.sleep(2)
+            continue
+
+        previous = ""
+        if os.path.exists(stamp):
+            previous = open(stamp).read().strip()
+        for name, value in (("owner", ME), ("cwd", cwd),
+                            ("since", time.strftime("%H:%M"))):
+            open(os.path.join(lease, name), "w").write(value)
+        open(stamp, "w").write(ME)
+        notice = (
+            f"You now hold the lease on {serial}. Other agents are blocked from it until "
+            f"you run `devlease release {serial}` — do that as soon as you are done with "
+            "the device."
+        )
+        if previous and previous != ME:
+            notice = (
+                f"Device {serial} state changed: session {previous[:8]} held it since you "
+                "last did. Whatever you installed or set up on it may be gone. Reinstall "
+                "and re-establish app state before trusting anything you see.\n" + notice
+            )
+        return True, notice
+
+
+def gate(cmd, cwd):
+    rules = load_rules(cwd)
+    hit = matches(rules["denied"], cmd)
+    if hit:
+        return "deny", (
+            f"Refused by a .devlease.json `denied` rule ({hit}). This command is "
+            "configured as never-allowed here, usually because it disrupts other "
+            "agents. Ask the user to run it themselves if it is genuinely needed."
+        )
+    if GLOBAL.search(cmd):
+        return "deny", (
+            "Global adb operations (kill-server, start-server, root, reboot, usb, "
+            "tcpip, disconnect, -d, -e) break other agents sharing this adb server. "
+            "Ask the user to run it themselves if it is genuinely needed."
+        )
+    kinds = classify(cmd)
+    emulator_only = matches(rules["emulator_only"], cmd)
+    if not kinds and not (emulator_only or matches(rules["gated"], cmd)):
+        return "allow", None
+
+    serial = resolve(cmd, kinds)
+    if not serial:
+        count = len(attached())
+        situation = ("no devices are attached" if count == 0
+                     else "more than one is attached")
+        return "deny", (
+            f"Cannot tell which device this targets, and {situation}. "
+            "Set ANDROID_SERIAL, or pass the target explicitly: `adb -s <serial>`, "
+            "`-Pdevice=<serial>` for :maestro: tasks, `--device <serial>` for maestro, "
+            "`--device=<serial>` for the android CLI. Run `adb devices` to list them."
+        )
+    if emulator_only and not serial.startswith("emulator-"):
+        return "deny", (
+            f"{serial} is a physical device, and a .devlease.json `emulator_only` "
+            f"rule ({emulator_only}) restricts this command to emulators. Target an "
+            "emulator instead — `adb devices` lists them as emulator-<port>."
+        )
+
+    ok, message = acquire(serial, cwd)
+    return ("allow" if ok else "deny"), message
+
+
+def hook():
+    payload = json.load(sys.stdin)
+    tool_input = payload.get("tool_input") or {}
+    cwd = payload.get("cwd", "")
+    global ME
+    ME = payload.get("session_id") or ME
+
+    commands = []
+    for key in ("command", "code"):
+        if isinstance(tool_input.get(key), str):
+            commands.append(tool_input[key])
+    for entry in tool_input.get("commands") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("command"), str):
+            commands.append(entry["command"])
+
+    warnings = []
+    for cmd in commands:
+        decision, message = gate(cmd, cwd)
+        if decision == "deny":
+            emit(permissionDecision="deny", permissionDecisionReason=message)
+            return
+        if message:
+            warnings.append(message)
+    if warnings:
+        emit(additionalContext="\n".join(warnings))
+
+
+def emit(**fields):
+    fields["hookEventName"] = "PreToolUse"
+    print(json.dumps({"hookSpecificOutput": fields}))
+
+
+def leases():
+    if not os.path.isdir(DIR):
+        return []
+    out = []
+    for name in sorted(os.listdir(DIR)):
+        path = os.path.join(DIR, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            owner = open(os.path.join(path, "owner")).read().strip()
+        except OSError:
+            owner = "?"
+        out.append((name, path, owner))
+    return out
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "hook"
+    if mode == "hook":
+        try:
+            hook()
+        except Exception as exc:  # never block a tool call on a bug in here
+            print(f"devlease: {exc}", file=sys.stderr)
+        return 0
+    if mode == "list":
+        for name, path, owner in leases():
+            mine = " (you)" if owner == ME else ""
+            print(f"{name}  session {owner[:8]}{mine}  idle {int(age(path) // 60)}m")
+        return 0
+    if mode == "release":
+        target = sys.argv[2] if len(sys.argv) > 2 else None
+        for name, path, owner in leases():
+            if owner == ME and (target is None or name == target):
+                shutil.rmtree(path, ignore_errors=True)
+                print(f"released {name}")
+        return 0
+    if mode == "steal":
+        if len(sys.argv) < 3:
+            print("usage: devlease steal <serial>", file=sys.stderr)
+            return 2
+        shutil.rmtree(os.path.join(DIR, sys.argv[2]), ignore_errors=True)
+        print(f"stole {sys.argv[2]}")
+        return 0
+    print("usage: devlease [hook|list|release [serial]|steal <serial>]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
