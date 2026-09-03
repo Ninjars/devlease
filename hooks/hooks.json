@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__.*ctx_execute|mcp__.*ctx_execute_file|mcp__.*ctx_batch_execute",
+        "matcher": "Bash|mcp__plugin_context-mode_context-mode__ctx_execute|mcp__plugin_context-mode_context-mode__ctx_execute_file|mcp__plugin_context-mode_context-mode__ctx_batch_execute",
         "hooks": [
           {
             "type": "command",

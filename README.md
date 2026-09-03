@@ -21,11 +21,17 @@ else. Nothing else about how agents work changes.
 /plugin install devlease
 ```
 
-That wires the hook. Optionally put the CLI on your `PATH`:
+That wires the hook. Plugin hooks load when a session starts, so open a new
+session before expecting the gate to fire.
+
+To put the CLI on your `PATH`, point at the installed version explicitly:
 
 ```
-ln -s ~/.claude/plugins/cache/devlease/devlease/*/bin/devlease ~/bin/devlease
+ln -sf "$(ls -d ~/.claude/plugins/cache/devlease/devlease/*/ | tail -1)bin/devlease" ~/bin/devlease
 ```
+
+Re-run that after upgrading, or clone the repo and symlink `bin/devlease` from
+the clone instead, which survives version changes.
 
 **Standalone**
 
@@ -50,8 +56,14 @@ Clone anywhere, then add to `~/.claude/settings.json`:
 }
 ```
 
-Takes effect immediately — no restart. Requires `python3` (standard library only)
-and `adb` on `PATH`.
+Edits to `settings.json` take effect immediately, with no restart — unlike the
+plugin route, where hooks load at session start.
+
+The `matcher` above covers the `Bash` tool. If you use a plugin that runs shell
+commands through its own MCP tool, add those tool names to the alternation; the
+shipped `hooks/hooks.json` does this for context-mode's sandbox tools.
+
+Requires `python3` (standard library only) and `adb` on `PATH`.
 
 ## What it gates
 
