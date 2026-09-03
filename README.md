@@ -180,13 +180,29 @@ Environment overrides, mostly for testing: `DEVLEASE_DIR`, `DEVLEASE_TTL`,
 - **One machine.** Leases are local directories; this does not coordinate across
   hosts or a device farm.
 
-## Tests
+## Working on devlease
 
 ```
 bash tests/devlease.test.sh
 ```
 
-No framework, no fixtures — it drives the hook over stdin the way Claude Code does.
+No framework, no fixtures — it drives the hook over stdin the way Claude Code
+does.
+
+Installing a plugin *copies* it into `~/.claude/plugins/cache/`, so editing this
+repo does not change what the hook runs, and `claude plugin marketplace update`
+will tell you it succeeded while leaving the old copy in place. Replace the copy
+with a symlink once and the problem goes away:
+
+```
+cd ~/.claude/plugins/cache/devlease/devlease
+rm -rf <version> && ln -s /path/to/your/devlease <version>
+```
+
+The hook then runs your working tree, and a `devlease` on your `PATH` that points
+into the same checkout cannot disagree with it. `claude plugin uninstall` +
+`install` replaces the symlink with a copy again, so re-create it afterwards.
+Hooks load at session start either way, so changes appear in the next session.
 
 ## License
 
