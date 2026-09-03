@@ -7,6 +7,7 @@ CLI mode (list/release/steal) is for agents and for you.
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -21,15 +22,26 @@ WAIT = int(os.environ.get("DEVLEASE_WAIT", 50))
 
 ME = os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
 
-# adb ops that reconfigure the whole adb server or reboot a device: one agent
-# running these breaks every other agent's session, so no lease can justify them.
-# Anchored at the subcommand position (right after `adb`, past an optional -s
-# <serial>). Further along, these same tokens are ordinary arguments: `install -d`
-# is allow-downgrade, `am start -e` is a string extra, `dumpsys usb` is a query.
-GLOBAL = re.compile(
-    r"(?:^|[\s/\"'])adb(?:\s+-s\s+\S+)?\s+"
-    r"(?:-[de]|kill-server|start-server|root|unroot|reboot|usb|tcpip|disconnect)(?:\s|$)"
-)
+# adb subcommands that reconfigure the whole adb server or reboot a device: one
+# agent running these breaks every other agent's session, so no lease justifies them.
+GLOBAL_SUBCOMMANDS = {"kill-server", "start-server", "root", "unroot", "reboot",
+                      "usb", "tcpip", "disconnect"}
+ADB_LOCAL = {"devices", "version", "help"}
+MAESTRO_LOCAL = {"start-device", "download-samples", "login", "logout", "upload",
+                 "cloud"}
+ANDROID_DEVICE_SUBCOMMANDS = {"install", "run", "screen", "layout"}
+# Anchored at the start of the task name: assembleDebugAndroidTest and
+# compileDebugAndroidTestKotlin build the test APK without touching a device.
+GRADLE_TASK = re.compile(r"^(?:install|uninstall|connected)")
+
+# Commands that run another command, so the real target is further along.
+WRAPPERS = {"env", "timeout", "gtimeout", "nice", "nohup", "stdbuf", "sudo",
+            "command", "xargs"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+OPERATORS = {"|", "||", "&&", ";", "&", "(", ")", "{", "}", "!", "\n"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+WRAPPER_ARG = re.compile(r"^-|^[\d.]+[smhd]?$")
+
 RULE_KEYS = ("denied", "gated", "emulator_only")
 
 
@@ -71,22 +83,122 @@ def matches(rules, cmd):
                 None)
 
 
-ADB = re.compile(r"(?:^|[\s/\"'])adb(?:\s|$)")
-ADB_LOCAL = re.compile(r"(?:^|[\s/\"'])adb\s+(?:-s\s+\S+\s+)?(?:devices|version|help)\b")
-# Anchored at the start of the task name: `assembleDebugAndroidTest` and
-# `compileDebugAndroidTestKotlin` only build the test APK and never touch a device.
-GRADLE_DEVICE = re.compile(r"gradlew\b[^|;&]*?(?:^|[\s:])(?:install|uninstall|connected)\w*")
-MAESTRO = re.compile(r"(?:^|[\s/\"'])maestro(?:\s|$)")
-MAESTRO_LOCAL = re.compile(
-    r"(?:^|[\s/\"'])maestro\s+(?:start-device|download-samples|login|logout|upload|cloud)\b"
-)
-ANDROID_CLI = re.compile(r"(?:^|[\s/\"'])android\s+(?:install|run|screen|layout)\b")
 
-SERIAL_ADB = re.compile(r"(?:^|\s)-s\s+(\S+)")
-SERIAL_GRADLE = re.compile(r"-Pdevice=(\S+)")
-SERIAL_FLAG = re.compile(r"--device[= ](\S+)")
-# The hook inherits the agent's env, but not a serial assigned inline on the command.
-SERIAL_INLINE = re.compile(r"\bANDROID_SERIAL=(\S+)")
+def segments(cmd, depth=0):
+    """Simple commands in cmd as (as_written, name, args, assignments).
+
+    Splitting the way a shell would is the whole point: a device command that
+    appears inside a quoted argument — `grep "adb kill-server"`, `sed` editing a
+    script that mentions adb — is an argument, not a command, and must not be
+    gated. Returns None if the command cannot be parsed.
+    """
+    try:
+        tokens = shlex.split(cmd, posix=True)
+    except ValueError:
+        return None
+    groups, current = [], []
+    for token in tokens:
+        if token in OPERATORS:
+            if current:
+                groups.append(current)
+            current = []
+        else:
+            current.append(token)
+    if current:
+        groups.append(current)
+    out = []
+    for group in groups:
+        out.extend(_simple(group, depth))
+    return out
+
+
+def _simple(tokens, depth):
+    assignments = {}
+    while tokens and ASSIGNMENT.match(tokens[0]):
+        key, value = tokens[0].split("=", 1)
+        assignments[key] = value
+        tokens = tokens[1:]
+    if not tokens:
+        return []
+    written, args = tokens[0], tokens[1:]
+    name = os.path.basename(written)
+
+    if name in WRAPPERS and depth < 4:
+        rest = args
+        while rest and WRAPPER_ARG.match(rest[0]):
+            rest = rest[1:]
+        inner = _simple(rest, depth + 1)
+        if inner:
+            for item in inner:
+                item[3].update(assignments)
+            return inner
+
+    if name in SHELLS and depth < 4 and "-c" in args:
+        index = args.index("-c")
+        if index + 1 < len(args):
+            nested = segments(args[index + 1], depth + 1)
+            if nested:
+                for inner in nested:
+                    inner[3].update(assignments)
+                return nested
+
+    return [(written, name, args, assignments)]
+
+
+def is_global(name, args):
+    """True for an adb subcommand that affects every agent, whatever the serial."""
+    if name != "adb":
+        return False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("-d", "-e"):
+            return True
+        if arg == "-s" and index + 1 < len(args):
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return arg in GLOBAL_SUBCOMMANDS
+    return False
+
+
+def subcommand(args):
+    return next((a for a in args if not a.startswith("-")), None)
+
+
+def classify(name, args):
+    """The device-touching kind of one simple command, or None."""
+    if name == "adb":
+        return None if subcommand(args) in ADB_LOCAL else "adb"
+    if name in ("gradle", "gradlew"):
+        tasks = (a.rsplit(":", 1)[-1] for a in args if not a.startswith("-"))
+        return "gradle" if any(GRADLE_TASK.match(t) for t in tasks) else None
+    if name == "maestro":
+        return None if subcommand(args) in MAESTRO_LOCAL else "maestro"
+    if name == "android":
+        return "android" if subcommand(args) in ANDROID_DEVICE_SUBCOMMANDS else None
+    return None
+
+
+def serial_of(args, assignments, kind):
+    for index, arg in enumerate(args):
+        if arg.startswith("--device="):
+            return arg.split("=", 1)[1]
+        if arg.startswith("-Pdevice="):
+            return arg.split("=", 1)[1]
+        if arg == "--device" and index + 1 < len(args):
+            return args[index + 1]
+        if kind == "adb" and arg == "-s" and index + 1 < len(args):
+            return args[index + 1]
+    # The hook inherits the agent's env, but not a serial assigned inline.
+    if assignments.get("ANDROID_SERIAL"):
+        return assignments["ANDROID_SERIAL"]
+    if os.environ.get("ANDROID_SERIAL"):
+        return os.environ["ANDROID_SERIAL"]
+    devices = attached()
+    return devices[0] if len(devices) == 1 else None
 
 
 def attached():
@@ -99,35 +211,6 @@ def attached():
     except Exception:
         return []
     return [l.split()[0] for l in out.splitlines()[1:] if "\tdevice" in l]
-
-
-def classify(cmd):
-    """Return the set of device-touching command kinds in cmd."""
-    kinds = set()
-    if ADB.search(cmd) and not ADB_LOCAL.search(cmd):
-        kinds.add("adb")
-    if GRADLE_DEVICE.search(cmd):
-        kinds.add("gradle")
-    if MAESTRO.search(cmd) and not MAESTRO_LOCAL.search(cmd):
-        kinds.add("maestro")
-    if ANDROID_CLI.search(cmd):
-        kinds.add("android")
-    return kinds
-
-
-def resolve(cmd, kinds):
-    for pat in (SERIAL_GRADLE, SERIAL_FLAG, SERIAL_INLINE):
-        m = pat.search(cmd)
-        if m:
-            return m.group(1)
-    if "adb" in kinds:
-        m = SERIAL_ADB.search(cmd)
-        if m:
-            return m.group(1)
-    if os.environ.get("ANDROID_SERIAL"):
-        return os.environ["ANDROID_SERIAL"]
-    devices = attached()
-    return devices[0] if len(devices) == 1 else None
 
 
 def age(path):
@@ -192,46 +275,70 @@ def acquire(serial, cwd):
         return True, notice
 
 
+DEVICE_TOOLS = re.compile(r"(?:^|[\s/\"'])(?:adb|maestro|gradlew|android)(?:\s|$)")
+
+
 def gate(cmd, cwd):
     rules = load_rules(cwd)
-    hit = matches(rules["denied"], cmd)
-    if hit:
-        return "deny", (
-            f"Refused by a `denied` rule: {hit}. This command is configured as "
-            "never-allowed here, usually because it disrupts other agents. Ask the "
-            "user to run it themselves if it is genuinely needed."
-        )
-    if GLOBAL.search(cmd):
-        return "deny", (
-            "Global adb operations (kill-server, start-server, root, reboot, usb, "
-            "tcpip, disconnect, -d, -e) break other agents sharing this adb server. "
-            "Ask the user to run it themselves if it is genuinely needed."
-        )
-    kinds = classify(cmd)
-    emulator_only = matches(rules["emulator_only"], cmd)
-    if not kinds and not (emulator_only or matches(rules["gated"], cmd)):
+    parsed = segments(cmd)
+    if parsed is None:
+        if DEVICE_TOOLS.search(cmd):
+            return "deny", (
+                "devlease could not parse this command (unbalanced quotes?) and it "
+                "names an Android device tool, so it cannot tell which device the "
+                "command would touch. Rewrite it so it parses, or split it up."
+            )
         return "allow", None
 
-    serial = resolve(cmd, kinds)
-    if not serial:
-        count = len(attached())
-        situation = ("no devices are attached" if count == 0
-                     else "more than one is attached")
-        return "deny", (
-            f"Cannot tell which device this targets, and {situation}. "
-            "Set ANDROID_SERIAL, or pass the target explicitly: `adb -s <serial>`, "
-            "`-Pdevice=<serial>` for :maestro: tasks, `--device <serial>` for maestro, "
-            "`--device=<serial>` for the android CLI. Run `adb devices` to list them."
-        )
-    if emulator_only and not serial.startswith("emulator-"):
-        return "deny", (
-            f"{serial} is a physical device, and an `emulator_only` rule restricts "
-            f"this command to emulators: {emulator_only}. Target an emulator instead "
-            "— `adb devices` lists them as emulator-<port>."
-        )
+    notices = []
+    for written, name, args, assignments in parsed:
+        text = " ".join([written] + args)
 
-    ok, message = acquire(serial, cwd)
-    return ("allow" if ok else "deny"), message
+        hit = matches(rules["denied"], text)
+        if hit:
+            return "deny", (
+                f"Refused by a `denied` rule: {hit}. This command is configured as "
+                "never-allowed here, usually because it disrupts other agents. Ask "
+                "the user to run it themselves if it is genuinely needed."
+            )
+        if is_global(name, args):
+            return "deny", (
+                "Global adb operations (kill-server, start-server, root, reboot, "
+                "usb, tcpip, disconnect, -d, -e) break other agents sharing this adb "
+                "server. Ask the user to run it themselves if it is genuinely needed."
+            )
+
+        kind = classify(name, args)
+        emulator_only = matches(rules["emulator_only"], text)
+        if not kind and not (emulator_only or matches(rules["gated"], text)):
+            continue
+
+        serial = serial_of(args, assignments, kind)
+        if not serial:
+            count = len(attached())
+            situation = ("no devices are attached" if count == 0
+                         else "more than one is attached")
+            return "deny", (
+                f"Cannot tell which device `{name}` targets, and {situation}. Set "
+                "ANDROID_SERIAL, or pass the target explicitly: `adb -s <serial>`, "
+                "`--device <serial>` for maestro, `--device=<serial>` for the android "
+                "CLI, `-Pdevice=<serial>` for a Gradle task that takes one. Run `adb "
+                "devices` to list them."
+            )
+        if emulator_only and not serial.startswith("emulator-"):
+            return "deny", (
+                f"{serial} is a physical device, and an `emulator_only` rule restricts "
+                f"this command to emulators: {emulator_only}. Target an emulator "
+                "instead — `adb devices` lists them as emulator-<port>."
+            )
+
+        ok, message = acquire(serial, cwd)
+        if not ok:
+            return "deny", message
+        if message:
+            notices.append(message)
+
+    return "allow", "\n".join(notices) or None
 
 
 def hook():

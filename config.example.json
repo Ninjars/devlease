@@ -1,8 +1,8 @@
 {
-  "_comment": "Copy to ~/.config/devlease/config.json (personal, or $XDG_CONFIG_HOME/devlease/config.json) or <repo>/.devlease.json (project). Both are read and their rules concatenated. Values are Python regexes matched against the whole command string.",
+  "_comment": "Copy to ~/.config/devlease/config.json (personal, or $XDG_CONFIG_HOME/devlease/config.json) or <repo>/.devlease.json (project). Both are read and their rules concatenated. Values are Python regexes, matched against one parsed command segment at a time — so `^` anchors to command position, which is what you usually want for a script path.",
 
   "denied": [
-    "scripts/reset-device-farm\\.sh"
+    "^(?:\\./)?scripts/reset-device-farm\\.sh"
   ],
 
   "gated": [

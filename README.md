@@ -83,6 +83,13 @@ Build-only work is never gated: `assembleDebugAndroidTest` and
 `compileDebugAndroidTestKotlin` build the test APK without touching a device, and
 `maestro start-device` is what creates an emulator in the first place.
 
+The command is split the way a shell would split it, and only words in command
+position are considered. `grep -rn "adb kill-server" docs/` runs `grep`, not
+`adb`, and is left alone; so is a `sed` that edits a script whose name mentions
+adb. Wrappers are followed through — `timeout 30 adb …`, `env FOO=bar adb …`,
+`bash -c "adb …"`, and the far side of `&&` or `|` all resolve to the real
+command.
+
 **Always refused, no lease possible:** `adb kill-server`, `start-server`, `root`,
 `unroot`, `reboot`, `usb`, `tcpip`, `disconnect`, and `adb -d` / `adb -e`. These
 reconfigure the shared adb server or reboot a device out from under whoever holds
@@ -126,9 +133,15 @@ Both files are read and their rules concatenated.
 | `gated` | requires a lease |
 | `emulator_only` | requires a lease **and** an `emulator-*` serial |
 
-Values are Python regexes matched against the whole command string. A missing or
-malformed file costs you those rules and nothing else; the built-in gating still
-applies.
+Values are Python regexes, matched against one parsed command segment at a time
+rather than the raw command line. A segment starts with the command word, so `^`
+anchors to command position — `^(?:\./)?scripts/reset-device-farm\.sh` refuses
+that script when it runs, and ignores it when it is merely an argument to `sed`
+or `git`. Leave the anchor off when you mean to match an argument, such as a
+Gradle task name.
+
+A missing or malformed file costs you those rules and nothing else; the built-in
+gating still applies.
 
 ## How leases behave
 
@@ -152,11 +165,13 @@ Environment overrides, mostly for testing: `DEVLEASE_DIR`, `DEVLEASE_TTL`,
 
 ## Known limits
 
-- **Text mentions take leases.** The gate matches command text, so writing a script
-  or heredoc that merely contains `adb -s …` takes a lease. This is deliberate: the
-  alternative — matching only commands in executable position — misses real
-  invocations like `timeout 30 adb …`, and under-blocking is the failure this exists
-  to prevent. `devlease release` undoes it.
+- **A shell script argument is not followed.** `bash deploy.sh` is treated as a
+  `bash` invocation; whatever `deploy.sh` does to a device is invisible until the
+  script's own commands reach the hook, which they never do. `bash -c "adb …"` is
+  followed, because the command is right there in the argument.
+- **Unparseable commands are refused** if they name a device tool. Unbalanced
+  quotes mean the gate cannot tell what would run, and guessing in either
+  direction is worse than asking you to rewrite it.
 - **Fails open.** A bug in the hook prints to stderr and allows the command, rather
   than blocking all Android work.
 - **Subagents are untested.** Whether a subagent's hook `session_id` matches its

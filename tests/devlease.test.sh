@@ -153,6 +153,35 @@ check "a project's own gradle task is not core-gated" \
 [ -d "$DEVLEASE_DIR/emulator-5554" ] && { fail=$((fail+1)); echo "FAIL: core gated a project-specific task"; } || pass=$((pass+1))
 check "adb on physical is fine" "$(hook A 'adb -s R58MSAMPLE01 shell ls')" allow
 
+# --- shell-aware parsing: a quoted argument is not a command ---
+reset
+check "a device command quoted inside grep is not gated" \
+  "$(hook A 'grep -rn "adb kill-server" docs/')" allow
+check "a device command inside echo is not gated" \
+  "$(hook A "echo 'run adb -s emulator-5554 shell ls' >> notes.md")" allow
+check "sed editing a file whose name mentions adb is not gated" \
+  "$(hook A "sed -i '' 's/x/y/' scripts/adb-helper.sh")" allow
+[ -d "$DEVLEASE_DIR/emulator-5554" ] && { fail=$((fail+1)); echo "FAIL: quoted text took a lease"; } || pass=$((pass+1))
+
+reset
+check "timeout wrapper is still gated" \
+  "$(hook A 'timeout 30 adb -s emulator-5554 shell ls')" allow
+[ -d "$DEVLEASE_DIR/emulator-5554" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: timeout wrapper not gated"; }
+reset
+check "bash -c is still gated" \
+  "$(hook A "bash -c 'adb -s emulator-5554 shell ls'")" allow
+[ -d "$DEVLEASE_DIR/emulator-5554" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: bash -c not gated"; }
+reset
+check "a later pipeline segment is still gated" \
+  "$(hook A 'cd app && adb -s emulator-5554 shell ls')" allow
+[ -d "$DEVLEASE_DIR/emulator-5554" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: second segment not gated"; }
+reset
+check "global op inside bash -c is still refused" \
+  "$(hook A "bash -c 'adb kill-server'")" deny "other agents"
+reset
+check "an unparseable command naming a device tool is refused" \
+  "$(hook A "adb -s emulator-5554 shell echo it's")" deny "parse"
+
 # --- batch tool input shape ---
 reset
 out=$(python3 -c '
@@ -167,7 +196,7 @@ check "batch_execute is gated too" "$out" allow
 # --- project and home config ---
 PROJ="$(mktemp -d)"; FAKEHOME="$(mktemp -d)"
 cat > "$PROJ/.devlease.json" <<'JSON'
-{"denied": ["scripts/ci-only\\.sh"],
+{"denied": ["^\\./?scripts/ci-only\\.sh"],
  "gated": ["flutter\\s+run"],
  "emulator_only": ["flutter\\s+drive"]}
 JSON
@@ -187,6 +216,8 @@ check "config emulator_only rejects a physical serial" \
   "$(hook_cwd A "$PROJ" 'flutter drive --device R58MSAMPLE01')" deny "physical"
 check "config emulator_only accepts an emulator" \
   "$(hook_cwd A "$PROJ" 'flutter drive --device emulator-5554')" allow
+check "an anchored config rule ignores the same path as an argument" \
+  "$(hook_cwd A "$PROJ" "sed -i '' 's/a/b/' ./scripts/ci-only.sh")" allow
 
 reset
 check "a project without config is unaffected" \
