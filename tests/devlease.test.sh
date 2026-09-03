@@ -5,7 +5,11 @@ DEVLEASE_DIR="$(mktemp -d)"
 export DEVLEASE_DIR
 export DEVLEASE_WAIT=0
 export DEVLEASE_DEVICES="emulator-5554 emulator-5556 R58MSAMPLE01"
-trap 'rm -rf "$DEVLEASE_DIR"' EXIT
+# Without this the suite picks up the personal ~/.devlease.json of whoever runs it and fails
+# against their personal rules. Tests that need a home config set HOME themselves.
+HOME="$(mktemp -d)"
+export HOME
+trap 'rm -rf "$DEVLEASE_DIR" "$HOME"' EXIT
 
 pass=0; fail=0
 
