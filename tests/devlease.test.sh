@@ -192,6 +192,15 @@ print(json.dumps({"session_id":"A","cwd":"/tmp/wt",
   | "$DEVLEASE" hook)
 check "batch_execute is gated too" "$out" allow
 [ -d "$DEVLEASE_DIR/emulator-5554" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: batch command not gated"; }
+reset
+out=$(python3 -c '
+import json
+print(json.dumps({"session_id":"A","cwd":"/tmp/wt",
+  "tool_name":"mcp__context_mode__ctx_batch",
+  "tool_input":{"commands":["git status","adb -s emulator-5554 shell ls"],"queries":["q"]}}))' \
+  | "$DEVLEASE" hook)
+check "context-mode 2.x ctx_batch string commands are gated" "$out" allow
+[ -d "$DEVLEASE_DIR/emulator-5554" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: ctx_batch string command not gated"; }
 
 # --- project and home config ---
 PROJ="$(mktemp -d)"; FAKEHOME="$(mktemp -d)"

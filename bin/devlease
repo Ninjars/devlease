@@ -352,9 +352,12 @@ def hook():
     for key in ("command", "code"):
         if isinstance(tool_input.get(key), str):
             commands.append(tool_input[key])
+    # context-mode v1 batches send {"label", "command"} objects, v2 plain strings.
     for entry in tool_input.get("commands") or []:
-        if isinstance(entry, dict) and isinstance(entry.get("command"), str):
-            commands.append(entry["command"])
+        if isinstance(entry, dict):
+            entry = entry.get("command")
+        if isinstance(entry, str):
+            commands.append(entry)
 
     warnings = []
     for cmd in commands:
