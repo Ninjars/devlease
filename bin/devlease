@@ -51,6 +51,9 @@ HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*\\?(['\"]?)(\w[\w.-]*)\2")
 SUBSTITUTION = re.compile(r"\$\(((?:[^()]|\([^()]*\))*)\)|`([^`]*)`")
 # A '…' holding a `"` may be a mispaired apostrophe, so it stays and is gated.
 LITERAL = re.compile(r"""\\.|"(?:\\.|[^"\\])*"|'[^'"]*'""", re.S)
+# An unquoted `#` at a word start comments out the line; one holding `"`, `` ` `` or `)`
+# may sit in a nested quote this cannot see, so it is kept and gated.
+COMMENT = re.compile(r"""\\.|"(?:\\.|[^"\\])*"|'[^']*'|(?<!\S)#[^\n"`)]*$""", re.S | re.M)
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 WRAPPER_ARG = re.compile(r"^-|^[\d.]+[smhd]?$")
 
@@ -104,9 +107,10 @@ def segments(cmd, depth=0):
     script that mentions adb — is an argument, not a command, and must not be
     gated. Returns None if the command cannot be parsed.
     """
+    text = COMMENT.sub(lambda m: "" if m[0][0] == "#" else m[0], drop_heredoc_bodies(cmd))
     # The shell drops a `\` and newline pair, so `ad\⏎b` is `adb`.
     # ponytail: this also joins after an escaped `\\`, where the shell keeps the newline.
-    text = drop_heredoc_bodies(cmd).replace("\\\n", "")
+    text = text.replace("\\\n", "")
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=PUNCTUATION)
         # Newlines end commands, as `;` does, so they are punctuation, not whitespace.
@@ -116,12 +120,13 @@ def segments(cmd, depth=0):
         return None
     out = []
     if depth < 4:
-        # The shell runs "$( … )" and backticks inside double quotes, not single ones.
-        unquoted = LITERAL.sub(lambda m: "" if m[0][0] == "'" else m[0], text)
+        # The shell runs "$( … )" and backticks inside double quotes, not single or escaped ones.
+        unquoted = LITERAL.sub(lambda m: "" if m[0][0] == "'" else re.sub(r"\\.", "", m[0]), text)
         for dollar, backtick in SUBSTITUTION.findall(unquoted):
             out.extend(segments(dollar or backtick, depth + 1) or [])
     groups, current = [], []
     for token in tokens:
+        # ponytail: shlex drops quotes, so a quoted "&&" or ";" splits too; that fails closed.
         pieces = OPERATOR.findall(token) if token and set(token) <= set(PUNCTUATION) else [token]
         for piece in pieces:
             if piece in OPERATORS:

@@ -126,8 +126,8 @@ adb. Wrappers are followed through — `timeout 30 adb …`, `env FOO=bar adb �
 `bash -c "adb …"`, and the far side of `&&` or `|` all resolve to the real
 command. So do a new line, `;` or `&&` without spaces, `$( … )` and backticks
 (in double quotes or unquoted), `<( … )`, `time`, and the command after `if`,
-`then` or `do`.
-A heredoc's body and a comment line are data, so they are not checked, though
+`then` or `do`. An escaped `\$( … )` is text.
+A heredoc's body and a comment are data, so they are not checked, though
 the shell does run a `$( … )` in a heredoc whose delimiter is unquoted.
 Redirections such as `>log` or `2>&1` are ignored.
 

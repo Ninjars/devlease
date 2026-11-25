@@ -258,9 +258,9 @@ reset
 check "an unparseable command naming a device tool is refused" \
   "$(hook A "adb -s emulator-5554 shell echo it's")" deny "parse"
 check "an unparseable command with a tool right after ( is refused" \
-  "$(hook A $'X=$(adb -s emulator-5554 shell getprop)  # don\'t cache')" deny "parse"
+  "$(hook A $'X=$(adb -s emulator-5554 shell echo it\'s)')" deny "parse"
 check "an unparseable command with a tool right after ; is refused" \
-  "$(hook A $'true;adb kill-server  # don\'t')" deny "parse"
+  "$(hook A $'true;adb shell echo it\'s')" deny "parse"
 
 # --- separators without spaces, newlines and substitutions still end a command ---
 leased() { # leased <desc>: the last hook call took the emulator-5554 lease
@@ -342,6 +342,12 @@ check "a process substitution joined to another is still gated" \
 reset; hook A 'adb -s 12345 >log shell ls' >/dev/null
 [ -d "$DEVLEASE_DIR/12345" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: a numeric serial before a redirection was lost"; }
 check "a script named like a keyword is not a keyword" "$(hook A './scripts/do adb kill-server')" allow
+reset; hook A $'X=$(adb -s emulator-5554 shell getprop)  # don\'t cache' >/dev/null
+leased "an apostrophe in a trailing comment does not hide the command"
+check "a ; in a trailing comment is not a separator" "$(hook A 'echo hello # example; adb kill-server')" allow
+check "a # inside a word is not a comment" "$(hook A 'curl http://x/#/a;adb kill-server')" deny "other agents"
+check "an escaped \$( ) in double quotes is text" "$(hook A 'echo "\$(adb kill-server)"')" allow
+check "an escaped backslash before \$( ) still runs it" "$(hook A 'echo "\\\\$(adb kill-server)"')" deny "other agents"
 reset
 check "a backtick span in single quotes is text" \
   "$(hook A "gh pr comment 2 --body 'Run \`adb -s emulator-5554 install x.apk\` first'")" allow
