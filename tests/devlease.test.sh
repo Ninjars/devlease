@@ -123,6 +123,41 @@ check "owner release frees it" "$(hook B 'adb -s emulator-5554 shell ls')" allow
 "$DEVLEASE" steal emulator-5554 >/dev/null
 check "steal frees it" "$(hook A 'adb -s emulator-5554 shell ls')" allow
 
+# --- the hook releases, for a shell that has no session id (Codex) ---
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+check "devlease release is not gated" "$(hook A 'devlease release emulator-5554')" allow
+check "the hook releases the named lease" "$(hook B 'adb -s emulator-5554 shell ls')" allow
+check "the hook keeps the session's other leases" \
+  "$(hook B 'adb -s emulator-5556 shell ls')" deny "held by"
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+hook B 'devlease release emulator-5554' >/dev/null
+check "a release through the hook leaves other sessions' leases" \
+  "$(hook C 'adb -s emulator-5554 shell ls')" deny "held by"
+hook A '"$HOME/bin/devlease" release' >/dev/null
+check "a release with no serial frees all of the session's leases" \
+  "$(hook C 'adb -s emulator-5556 shell ls')" allow
+
+# --- session end releases the ending session's leases ---
+session_end() {
+  python3 -c '
+import json,sys
+print(json.dumps({"session_id":sys.argv[1],"cwd":"/tmp/wt","hook_event_name":"SessionEnd",
+                  "reason":"other"}))' "$1" | "$DEVLEASE" hook
+}
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+hook B 'adb -s R58MSAMPLE01 shell ls' >/dev/null
+check "session end prints nothing" "$(session_end A)" allow
+check "session end frees the session's leases" "$(hook C 'adb -s emulator-5554 shell ls')" allow
+check "session end frees every lease it held" "$(hook C 'adb -s emulator-5556 shell ls')" allow
+check "session end leaves other sessions' leases" \
+  "$(hook C 'adb -s R58MSAMPLE01 shell ls')" deny "held by"
+
 # --- idle TTL reap ---
 reset
 hook A 'adb -s emulator-5554 shell ls' >/dev/null

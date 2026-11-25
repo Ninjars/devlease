@@ -294,6 +294,13 @@ def gate(cmd, cwd):
     for written, name, args, assignments in parsed:
         text = " ".join([written] + args)
 
+        # The CLI knows its session only from CLAUDE_CODE_SESSION_ID, which a Codex
+        # shell does not set, so the hook, which gets session_id, does the release.
+        if name == "devlease" and subcommand(args) == "release":
+            rest = args[args.index("release") + 1:]
+            release(ME, next((a for a in rest if not a.startswith("-")), None))
+            continue
+
         hit = matches(rules["denied"], text)
         if hit:
             return "deny", (
@@ -348,6 +355,10 @@ def hook():
     global ME
     ME = payload.get("session_id") or ME
 
+    if payload.get("hook_event_name") == "SessionEnd":
+        release(ME)
+        return
+
     commands = []
     for key in ("command", "code"):
         if isinstance(tool_input.get(key), str):
@@ -392,6 +403,16 @@ def leases():
     return out
 
 
+def release(session, target=None):
+    """Remove the leases session holds, or only the one on target. Returns their names."""
+    freed = []
+    for name, path, owner in leases():
+        if owner == session and (target is None or name == target):
+            shutil.rmtree(path, ignore_errors=True)
+            freed.append(name)
+    return freed
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "hook"
     if mode == "hook":
@@ -406,11 +427,8 @@ def main():
             print(f"{name}  session {owner[:8]}{mine}  idle {int(age(path) // 60)}m")
         return 0
     if mode == "release":
-        target = sys.argv[2] if len(sys.argv) > 2 else None
-        for name, path, owner in leases():
-            if owner == ME and (target is None or name == target):
-                shutil.rmtree(path, ignore_errors=True)
-                print(f"released {name}")
+        for name in release(ME, sys.argv[2] if len(sys.argv) > 2 else None):
+            print(f"released {name}")
         return 0
     if mode == "steal":
         if len(sys.argv) < 3:
