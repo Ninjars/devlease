@@ -301,6 +301,39 @@ check "a <<- heredoc ends at a tab-indented terminator" \
 leased "the command after a <<- heredoc is gated"
 check "a here-string is not a heredoc" \
   "$(hook A $'cat <<<"adb kill-server"\nadb kill-server')" deny "other agents"
+check "a <<WORD that no WORD line closes is not a heredoc" \
+  "$(hook A $'grep -n \'<<EOF\' x.sh\ntrue && adb kill-server')" deny "other agents"
+check "an arithmetic shift is not a heredoc" \
+  "$(hook A $'echo $((1<<n))\nadb kill-server')" deny "other agents"
+check "a <<WORD in a comment is not a heredoc" \
+  "$(hook A $'# feed it via <<EOF\nadb kill-server')" deny "other agents"
+reset
+check "an apostrophe in a comment line does not make the command unparseable" \
+  "$(hook A $'# Don\'t reinstall\nadb -s emulator-5554 shell ls')" allow
+leased "the command after a comment line is gated"
+check "a <<\\EOF heredoc body is not gated" \
+  "$(hook A $'cat <<\\EOF > s.sh\nadb kill-server\nEOF')" allow
+check "a heredoc with a numeric delimiter is not gated" \
+  "$(hook A $'cat <<123 > s.sh\nadb kill-server\n123')" allow
+check "a continuation in a quoted heredoc does not swallow its terminator" \
+  "$(hook A $'cat > x.sh <<\'EOF\'\necho a \\\nEOF\nadb kill-server')" deny "other agents"
+check "a word continued across lines is joined" \
+  "$(hook A $'ad\\\nb kill-server')" deny "other agents"
+
+# --- quoted substitutions, time, joined operators, numeric serials, keyword-named paths ---
+reset; hook A 'PID="$(adb -s emulator-5554 shell pidof x)"' >/dev/null
+leased "a device command in a quoted \$( ) is gated"
+check "a device command in backticks is gated" "$(hook A 'echo `adb kill-server`')" deny "other agents"
+reset; hook A 'time ./gradlew connectedDebugAndroidTest -Pdevice=emulator-5554' >/dev/null
+leased "a device command after time is gated"
+check "a device command after time -p is gated" "$(hook A 'time -p adb kill-server')" deny "other agents"
+check "a separator joined to a redirection still ends the command" \
+  "$(hook A 'true;>log adb kill-server')" deny "other agents"
+check "a process substitution joined to another is still gated" \
+  "$(hook A 'diff <(true)<(adb kill-server)')" deny "other agents"
+reset; hook A 'adb -s 12345 >log shell ls' >/dev/null
+[ -d "$DEVLEASE_DIR/12345" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: a numeric serial before a redirection was lost"; }
+check "a script named like a keyword is not a keyword" "$(hook A './scripts/do adb kill-server')" allow
 
 # --- batch tool input shape ---
 reset
