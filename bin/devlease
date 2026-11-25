@@ -146,6 +146,23 @@ def _simple(tokens, depth):
     return [(written, name, args, assignments)]
 
 
+# A redirection, alone (`>`, `2>`) or with its target attached (`>/dev/null`, `2>&1`).
+REDIRECT = re.compile(r"^\d*(?:>>?|<|&>|>&|<&)")
+
+
+def without_redirects(args):
+    """args as the program receives them: the shell removes redirections first."""
+    words, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif REDIRECT.match(arg):
+            skip = REDIRECT.fullmatch(arg) is not None  # the target is the next word
+        else:
+            words.append(arg)
+    return words
+
+
 def is_global(name, args):
     """True for an adb subcommand that affects every agent, whatever the serial."""
     if name != "adb":
@@ -308,7 +325,8 @@ def gate(cmd, cwd):
                     "releases before any of the command runs, so anything chained with "
                     "it would run on a device you no longer hold."
                 )
-            target = args[1] if len(args) > 1 else None
+            words = without_redirects(args[1:])
+            target = words[0] if words else None
             freed = release(ME, target)
             notices.append(
                 f"Released {', '.join(freed)}." if freed else

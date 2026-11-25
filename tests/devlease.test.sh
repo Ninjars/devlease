@@ -161,6 +161,20 @@ hook A 'devlease -v release emulator-5554' >/dev/null
 check "a flag before release is not a release" \
   "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
 
+# The shell strips redirections before the CLI runs, so the hook ignores them too.
+for form in 'devlease release >/dev/null' 'devlease release 2>&1' 'devlease release > /dev/null' 'devlease release &>/dev/null'; do
+  reset
+  hook A 'adb -s emulator-5554 shell ls' >/dev/null
+  hook A "$form" >/dev/null
+  check "$form releases" "$(hook B 'adb -s emulator-5554 shell ls')" allow
+done
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+hook A 'devlease release emulator-5554 >/dev/null 2>&1' >/dev/null
+check "a redirected release with a serial frees only that one" \
+  "$(hook B 'adb -s emulator-5556 shell ls')" deny "held by"
+
 # --- session end releases the ending session's leases ---
 session_end() {
   python3 -c '
