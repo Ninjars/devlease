@@ -124,7 +124,9 @@ position are considered. `grep -rn "adb kill-server" docs/` runs `grep`, not
 `adb`, and is left alone; so is a `sed` that edits a script whose name mentions
 adb. Wrappers are followed through — `timeout 30 adb …`, `env FOO=bar adb …`,
 `bash -c "adb …"`, and the far side of `&&` or `|` all resolve to the real
-command.
+command. So do a new line, `;` or `&&` without spaces, `$( … )`, `<( … )`, and
+the command after `if`, `then` or `do`. A heredoc's body is data, so it is not
+checked, and redirections such as `>log` or `2>&1` are ignored.
 
 **Always refused, no lease possible:** `adb kill-server`, `start-server`, `root`,
 `unroot`, `reboot`, `usb`, `tcpip`, `disconnect`, and `adb -d` / `adb -e`. These

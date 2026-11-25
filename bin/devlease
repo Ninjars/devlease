@@ -39,7 +39,15 @@ GRADLE_TASK = re.compile(r"^(?:install|uninstall|connected)")
 WRAPPERS = {"env", "timeout", "gtimeout", "nice", "nohup", "stdbuf", "sudo",
             "command", "xargs"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
-OPERATORS = {"|", "||", "&&", ";", "&", "(", ")", "{", "}", "!", "\n"}
+# Shell keywords that a command can follow, as in `while true; do adb …; done`.
+KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do"}
+OPERATORS = {"|", "||", "&&", ";", "&", "(", ")", "{", "}", "!", "\n", "<(", ">("}
+# The tokenizer splits these out of words, alone or run together (`&&\n`, `;;`).
+SEPARATOR_CHARS = set("();|&\n")
+# A redirection operator once split out: `>`, `>>`, `<`, `>&`, `&>`, `<<<`, `>|`.
+REDIRECT = re.compile(r"^&?[<>][<>&|]*$")
+# `<<WORD`, `<<-WORD`, `<< 'WORD'`, `<<"WORD"`, but not the here-string `<<<`.
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_.-]*)\2")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 WRAPPER_ARG = re.compile(r"^-|^[\d.]+[smhd]?$")
 
@@ -94,12 +102,16 @@ def segments(cmd, depth=0):
     gated. Returns None if the command cannot be parsed.
     """
     try:
-        tokens = shlex.split(cmd, posix=True)
+        lexer = shlex.shlex(drop_heredoc_bodies(cmd.replace("\\\n", " ")), posix=True,
+                            punctuation_chars="();<>|&\n")
+        # Newlines end commands, as `;` does, so they are punctuation, not whitespace.
+        lexer.whitespace_split, lexer.commenters, lexer.whitespace = True, "", " \t\r"
+        tokens = list(lexer)
     except ValueError:
         return None
     groups, current = [], []
     for token in tokens:
-        if token in OPERATORS:
+        if token in OPERATORS or (token and set(token) <= SEPARATOR_CHARS):
             if current:
                 groups.append(current)
             current = []
@@ -109,7 +121,42 @@ def segments(cmd, depth=0):
         groups.append(current)
     out = []
     for group in groups:
-        out.extend(_simple(group, depth))
+        out.extend(_simple(drop_redirections(group), depth))
+    return out
+
+
+def drop_heredoc_bodies(cmd):
+    """cmd without heredoc bodies: their lines are data, not commands.
+
+    ponytail: a `<<WORD` inside quotes is taken for a heredoc too, and hides the
+    lines after it up to WORD; track quotes here if that ever matters.
+    """
+    kept, pending = [], []
+    for line in cmd.split("\n"):
+        if pending:
+            strip_tabs, word = pending[0]
+            if (line.lstrip("\t") if strip_tabs else line) == word:
+                pending.pop(0)
+            continue
+        kept.append(line)
+        pending = [(dash == "-", word) for dash, _, word in HEREDOC.findall(line)]
+    return "\n".join(kept)
+
+
+def drop_redirections(tokens):
+    """tokens as the program receives them: the shell removes `>log`, `2>&1`, `<in`."""
+    out, skip = [], False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif REDIRECT.match(token):
+            # ponytail: `2>&1` splits into `2`, `>&`, `1`, so a number right before a
+            # redirection is taken for its file descriptor, even in `echo 2 >x`.
+            if out and out[-1].isdigit():
+                out.pop()
+            skip = True  # the target is the next word
+        else:
+            out.append(token)
     return out
 
 
@@ -123,6 +170,9 @@ def _simple(tokens, depth):
         return []
     written, args = tokens[0], tokens[1:]
     name = os.path.basename(written)
+
+    if name in KEYWORDS and depth < 4:
+        return _simple(args, depth + 1)
 
     if name in WRAPPERS and depth < 4:
         rest = args

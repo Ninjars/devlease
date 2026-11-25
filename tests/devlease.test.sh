@@ -258,6 +258,50 @@ reset
 check "an unparseable command naming a device tool is refused" \
   "$(hook A "adb -s emulator-5554 shell echo it's")" deny "parse"
 
+# --- separators without spaces, newlines and substitutions still end a command ---
+leased() { # leased <desc>: the last hook call took the emulator-5554 lease
+  [ -d "$DEVLEASE_DIR/emulator-5554" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: $1"; }
+}
+unleased() { # unleased <desc>: no hook call took the emulator-5554 lease
+  [ -d "$DEVLEASE_DIR/emulator-5554" ] && { fail=$((fail+1)); echo "FAIL: $1"; } || pass=$((pass+1))
+}
+reset; hook A $'cd app\nadb -s emulator-5554 shell ls' >/dev/null
+leased "a device command on the next line is gated"
+reset; hook A 'cd app&&adb -s emulator-5554 shell ls' >/dev/null
+leased "a device command after && without spaces is gated"
+check "a global op after ; without a space is refused" "$(hook A 'true;adb kill-server')" deny "other agents"
+reset; hook A 'echo $(adb -s emulator-5554 shell ls)' >/dev/null
+leased "a device command in \$( ) is gated"
+reset; hook A 'diff <(adb -s emulator-5554 shell ls) expected.txt' >/dev/null
+leased "a device command in <( ) is gated"
+reset
+check "a continued line keeps its arguments" \
+  "$(hook A $'./gradlew installDebug \\\n  -Pdevice=emulator-5554')" allow
+leased "a continued line keeps its arguments"
+reset; hook A '>log 2>&1 adb -s emulator-5554 shell ls' >/dev/null
+leased "a device command after leading redirections is gated"
+reset
+check "a redirection target named like a tool is not a command" "$(hook A 'echo hi > adb')" allow
+check "a global op after do is refused" "$(hook A 'while true; do adb kill-server; done')" deny "other agents"
+reset; hook A 'if adb -s emulator-5554 shell true; then echo ok; fi' >/dev/null
+leased "a device command after if is gated"
+
+# --- heredoc bodies are data, not commands ---
+reset
+check "a heredoc body is not gated" \
+  "$(hook A $'cat > run.sh <<\'EOF\'\nadb kill-server\nadb -s emulator-5554 install app.apk\nEOF')" allow
+unleased "a heredoc body took a lease"
+check "an apostrophe in a heredoc body does not make the command unparseable" \
+  "$(hook A $'git commit -F - <<EOF\nDon\'t race adb kill-server\nEOF')" allow
+check "the command after a heredoc is gated" \
+  "$(hook A $'cat <<EOF\nnotes\nEOF\nadb kill-server')" deny "other agents"
+reset
+check "a <<- heredoc ends at a tab-indented terminator" \
+  "$(hook A $'cat <<-EOF\n\tadb kill-server\n\tEOF\nadb -s emulator-5554 shell ls')" allow
+leased "the command after a <<- heredoc is gated"
+check "a here-string is not a heredoc" \
+  "$(hook A $'cat <<<"adb kill-server"\nadb kill-server')" deny "other agents"
+
 # --- batch tool input shape ---
 reset
 out=$(python3 -c '
