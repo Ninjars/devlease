@@ -286,6 +286,10 @@ reset; hook A '>log 2>&1 adb -s emulator-5554 shell ls' >/dev/null
 leased "a device command after leading redirections is gated"
 reset
 check "a redirection target named like a tool is not a command" "$(hook A 'echo hi > adb')" allow
+reset
+check "a quoted word starting with < is not a redirection" \
+  "$(hook A './gradlew installDebug "<x>" -Pdevice=emulator-5554')" allow
+leased "a quoted word starting with < kept the device argument after it"
 check "a global op after do is refused" "$(hook A 'while true; do adb kill-server; done')" deny "other agents"
 reset; hook A 'if adb -s emulator-5554 shell true; then echo ok; fi' >/dev/null
 leased "a device command after if is gated"
