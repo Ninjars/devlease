@@ -296,7 +296,7 @@ def acquire(serial, cwd):
 DEVICE_TOOLS = re.compile(r"(?:^|[\s/\"'])(?:adb|maestro|gradlew|android)(?:\s|$)")
 
 
-def gate(cmd, cwd):
+def gate(cmd, cwd, alone=True):
     rules = load_rules(cwd)
     parsed = segments(cmd)
     if parsed is None:
@@ -312,14 +312,11 @@ def gate(cmd, cwd):
     for written, name, args, assignments in parsed:
         text = " ".join([written] + args)
 
-        # The CLI knows its session only from CLAUDE_CODE_SESSION_ID, which a Codex
-        # shell does not set, so the hook, which gets session_id, does the release.
-        # It runs before the command does, so a release chained after device work
-        # would free the device while that work still runs.
-        # ponytail: refuses every chain, `cd x && devlease release` included; narrow
-        # it to chains with a gated segment if that refusal gets in the way.
+        # Released here because a Codex shell has no CLAUDE_CODE_SESSION_ID; it happens
+        # before anything runs, so device work chained or batched with it would lose its lease.
+        # ponytail: also refuses `cd x && devlease release`; narrow to chains with a gated segment.
         if name == "devlease" and args[:1] == ["release"]:
-            if len(parsed) > 1:
+            if len(parsed) > 1 or not alone:
                 return "deny", (
                     "Run `devlease release [serial]` as a command of its own. The hook "
                     "releases before any of the command runs, so anything chained with "
@@ -405,7 +402,7 @@ def hook():
 
     warnings = []
     for cmd in commands:
-        decision, message = gate(cmd, cwd)
+        decision, message = gate(cmd, cwd, len(commands) == 1)
         if decision == "deny":
             emit(permissionDecision="deny", permissionDecisionReason=message)
             return

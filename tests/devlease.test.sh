@@ -142,8 +142,6 @@ hook A '"$HOME/bin/devlease" release' >/dev/null
 check "a release with no serial frees all of the session's leases" \
   "$(hook C 'adb -s emulator-5556 shell ls')" allow
 
-# The hook releases before the command runs, so a release chained after device work
-# would leave that work running on a device the session no longer holds.
 reset
 hook A 'adb -s emulator-5554 shell ls' >/dev/null
 check "a release chained after device work is refused" \
@@ -153,6 +151,15 @@ check "a release fed through xargs is refused" \
   "$(hook A 'echo emulator-5554 | xargs devlease release')" deny "own"
 check "the refused xargs release keeps the lease" \
   "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+batch() { # batch <session> <command>...
+  python3 -c '
+import json,sys
+print(json.dumps({"session_id":sys.argv[1],"cwd":"/tmp/wt","tool_name":"mcp__context_mode__ctx_batch",
+                  "tool_input":{"commands":sys.argv[2:]}}))' "$@" | "$DEVLEASE" hook
+}
+check "a release batched after device work is refused" \
+  "$(batch A 'adb -s emulator-5554 install a.apk' 'devlease release emulator-5554')" deny "own"
+check "the refused batch keeps the lease" "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
 
 # The hook reads release's arguments the way the CLI does.
 check "release --help releases nothing" "$(hook A 'devlease release --help')" warn "no lease on --help"
