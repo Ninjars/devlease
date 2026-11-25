@@ -257,6 +257,10 @@ check "global op inside bash -c is still refused" \
 reset
 check "an unparseable command naming a device tool is refused" \
   "$(hook A "adb -s emulator-5554 shell echo it's")" deny "parse"
+check "an unparseable command with a tool right after ( is refused" \
+  "$(hook A $'X=$(adb -s emulator-5554 shell getprop)  # don\'t cache')" deny "parse"
+check "an unparseable command with a tool right after ; is refused" \
+  "$(hook A $'true;adb kill-server  # don\'t')" deny "parse"
 
 # --- separators without spaces, newlines and substitutions still end a command ---
 leased() { # leased <desc>: the last hook call took the emulator-5554 lease
@@ -334,6 +338,32 @@ check "a process substitution joined to another is still gated" \
 reset; hook A 'adb -s 12345 >log shell ls' >/dev/null
 [ -d "$DEVLEASE_DIR/12345" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: a numeric serial before a redirection was lost"; }
 check "a script named like a keyword is not a keyword" "$(hook A './scripts/do adb kill-server')" allow
+reset
+check "a backtick span in single quotes is text" \
+  "$(hook A "gh pr comment 2 --body 'Run \`adb -s emulator-5554 install x.apk\` first'")" allow
+unleased "a backtick span in single quotes took a lease"
+check "a \$( ) in single quotes is text" "$(hook A "echo '\$(adb kill-server)'")" allow
+check "apostrophes in nested quotes do not hide a \$( ) between them" \
+  "$(hook A $'echo "$(echo "it\'s")" "$(adb kill-server)" "$(echo "can\'t")"')" deny "other agents"
+reset; hook A $'PID="$(adb -s emulator-5554 shell ps | grep -E \'(foo|bar)\')"' >/dev/null
+leased "a quoted \$( ) with parentheses inside is gated"
+check "a comment line after a continuation still ends the command" \
+  "$(hook A $'echo a \\\n# note\nadb kill-server')" deny "other agents"
+
+# --- ctx_execute code: only shell code is read as shell ---
+ctx() { # ctx <language> <code>
+  python3 -c '
+import json,sys
+print(json.dumps({"session_id":"A","cwd":"/tmp/wt",
+  "tool_name":"mcp__plugin_context-mode_context-mode__ctx_execute",
+  "tool_input":{"language":sys.argv[1],"code":sys.argv[2]}}))' "$1" "$2" | "$DEVLEASE" hook
+}
+reset; ctx shell 'adb -s emulator-5554 shell ls' >/dev/null
+leased "ctx_execute shell code is gated"
+reset
+check "ctx_execute python code is not read as shell" \
+  "$(ctx python $'import shutil\nadb = shutil.which("adb")\nprint(adb)')" allow
+unleased "ctx_execute python code took a lease"
 
 # --- batch tool input shape ---
 reset
