@@ -21,7 +21,7 @@ else. Nothing else about how agents work changes.
 /plugin install devlease
 ```
 
-That wires the hook. Plugin hooks load when a session starts, so open a new
+That wires the hooks. Plugin hooks load when a session starts, so open a new
 session before expecting the gate to fire.
 
 To put the CLI on your `PATH`, point at the installed version explicitly:
@@ -51,6 +51,17 @@ Clone anywhere, then add to `~/.claude/settings.json`:
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/src/devlease/bin/devlease\" hook",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
@@ -62,6 +73,31 @@ plugin route, where hooks load at session start.
 The `matcher` above covers the `Bash` tool. If you use a plugin that runs shell
 commands through its own MCP tool, add those tool names to the alternation; the
 shipped `hooks/hooks.json` does this for context-mode's sandbox tools.
+
+**Codex**
+
+Codex sends its hooks the same payload, so the same script works. Add this to
+`~/.codex/config.toml`, with the path pointing at your `devlease`:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = '"$HOME/src/devlease/bin/devlease" hook'
+timeout = 120
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = '"$HOME/src/devlease/bin/devlease" hook'
+```
+
+Then start `codex`, run `/hooks` and trust both hooks: Codex skips a hook until
+you trust it. Install them for your user, not in a project's `.codex/`: Codex
+also skips project hooks in a project you have not trusted, and every new
+worktree is a new project. A tool that starts Codex with its own `CODEX_HOME`
+reads that directory's `config.toml` instead.
 
 Requires `python3` (standard library only) and `adb` on `PATH`.
 
@@ -146,8 +182,15 @@ gating still applies.
 ## How leases behave
 
 A lease is a directory under `~/.android-devlease/<serial>`, created with `mkdir`,
-which is atomic. It is held until the agent runs `devlease release`, and reaped
-after 60 minutes idle. Every gated command renews it.
+which is atomic. It is held until the agent runs `devlease release` or its
+session ends, and reaped after 60 minutes idle. Every gated command renews it.
+
+The hook does the release when it sees `devlease release` in a command, because
+it gets the session id from the agent. The CLI on its own knows the session only
+from `CLAUDE_CODE_SESSION_ID`, which a Codex shell does not set. The hook runs
+before the command does, so it refuses a `devlease release` chained with other
+commands: run it on its own. A release you then reject at the permission prompt
+has still happened.
 
 The TTL is deliberately longer than any single command, because nothing renews a
 lease while a 20-minute test suite is running. `PostToolUse` cannot help — it fires

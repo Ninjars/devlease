@@ -123,6 +123,82 @@ check "owner release frees it" "$(hook B 'adb -s emulator-5554 shell ls')" allow
 "$DEVLEASE" steal emulator-5554 >/dev/null
 check "steal frees it" "$(hook A 'adb -s emulator-5554 shell ls')" allow
 
+# --- the hook releases, for a shell that has no session id (Codex) ---
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+check "the hook says what it released" \
+  "$(hook A 'devlease release emulator-5554')" warn "Released emulator-5554"
+check "the hook releases the named lease" "$(hook B 'adb -s emulator-5554 shell ls')" allow
+check "the hook keeps the session's other leases" \
+  "$(hook B 'adb -s emulator-5556 shell ls')" deny "held by"
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+hook B 'devlease release emulator-5554' >/dev/null
+check "a release through the hook leaves other sessions' leases" \
+  "$(hook C 'adb -s emulator-5554 shell ls')" deny "held by"
+hook A '"$HOME/bin/devlease" release' >/dev/null
+check "a release with no serial frees all of the session's leases" \
+  "$(hook C 'adb -s emulator-5556 shell ls')" allow
+
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+check "a release chained after device work is refused" \
+  "$(hook A 'adb -s emulator-5554 install a.apk && devlease release emulator-5554')" deny "own"
+check "the refused chain keeps the lease" "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+check "a release fed through xargs is refused" \
+  "$(hook A 'echo emulator-5554 | xargs devlease release')" deny "own"
+check "the refused xargs release keeps the lease" \
+  "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+batch() { # batch <session> <command>...
+  python3 -c '
+import json,sys
+print(json.dumps({"session_id":sys.argv[1],"cwd":"/tmp/wt","tool_name":"mcp__context_mode__ctx_batch",
+                  "tool_input":{"commands":sys.argv[2:]}}))' "$@" | "$DEVLEASE" hook
+}
+check "a release batched after device work is refused" \
+  "$(batch A 'adb -s emulator-5554 install a.apk' 'devlease release emulator-5554')" deny "own"
+check "the refused batch keeps the lease" "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+
+# The hook reads release's arguments the way the CLI does.
+check "release --help releases nothing" "$(hook A 'devlease release --help')" warn "no lease on --help"
+check "the lease survives release --help" "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+hook A 'devlease -v release emulator-5554' >/dev/null
+check "a flag before release is not a release" \
+  "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+
+# The shell strips redirections before the CLI runs, so the hook ignores them too.
+for form in 'devlease release >/dev/null' 'devlease release 2>&1' 'devlease release > /dev/null' 'devlease release &>/dev/null'; do
+  reset
+  hook A 'adb -s emulator-5554 shell ls' >/dev/null
+  hook A "$form" >/dev/null
+  check "$form releases" "$(hook B 'adb -s emulator-5554 shell ls')" allow
+done
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+hook A 'devlease release emulator-5554 >/dev/null 2>&1' >/dev/null
+check "a redirected release with a serial frees only that one" \
+  "$(hook B 'adb -s emulator-5556 shell ls')" deny "held by"
+
+# --- session end releases the ending session's leases ---
+session_end() {
+  python3 -c '
+import json,sys
+print(json.dumps({"session_id":sys.argv[1],"cwd":"/tmp/wt","hook_event_name":"SessionEnd",
+                  "reason":"other"}))' "$1" | "$DEVLEASE" hook
+}
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+hook A 'adb -s emulator-5556 shell ls' >/dev/null
+hook B 'adb -s R58MSAMPLE01 shell ls' >/dev/null
+[ -z "$(session_end A)" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: session end printed output"; }
+check "session end frees the session's leases" "$(hook C 'adb -s emulator-5554 shell ls')" allow
+check "session end frees every lease it held" "$(hook C 'adb -s emulator-5556 shell ls')" allow
+check "session end leaves other sessions' leases" \
+  "$(hook C 'adb -s R58MSAMPLE01 shell ls')" deny "held by"
+
 # --- idle TTL reap ---
 reset
 hook A 'adb -s emulator-5554 shell ls' >/dev/null
