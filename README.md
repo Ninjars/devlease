@@ -187,7 +187,10 @@ session ends, and reaped after 60 minutes idle. Every gated command renews it.
 
 The hook does the release when it sees `devlease release` in a command, because
 it gets the session id from the agent. The CLI on its own knows the session only
-from `CLAUDE_CODE_SESSION_ID`, which a Codex shell does not set.
+from `CLAUDE_CODE_SESSION_ID`, which a Codex shell does not set. The hook runs
+before the command does, so it refuses a `devlease release` chained with other
+commands: run it on its own. A release you then reject at the permission prompt
+has still happened.
 
 The TTL is deliberately longer than any single command, because nothing renews a
 lease while a 20-minute test suite is running. `PostToolUse` cannot help — it fires

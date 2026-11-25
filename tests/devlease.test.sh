@@ -127,7 +127,8 @@ check "steal frees it" "$(hook A 'adb -s emulator-5554 shell ls')" allow
 reset
 hook A 'adb -s emulator-5554 shell ls' >/dev/null
 hook A 'adb -s emulator-5556 shell ls' >/dev/null
-check "devlease release is not gated" "$(hook A 'devlease release emulator-5554')" allow
+check "the hook says what it released" \
+  "$(hook A 'devlease release emulator-5554')" warn "Released emulator-5554"
 check "the hook releases the named lease" "$(hook B 'adb -s emulator-5554 shell ls')" allow
 check "the hook keeps the session's other leases" \
   "$(hook B 'adb -s emulator-5556 shell ls')" deny "held by"
@@ -141,6 +142,25 @@ hook A '"$HOME/bin/devlease" release' >/dev/null
 check "a release with no serial frees all of the session's leases" \
   "$(hook C 'adb -s emulator-5556 shell ls')" allow
 
+# The hook releases before the command runs, so a release chained after device work
+# would leave that work running on a device the session no longer holds.
+reset
+hook A 'adb -s emulator-5554 shell ls' >/dev/null
+check "a release chained after device work is refused" \
+  "$(hook A 'adb -s emulator-5554 install a.apk && devlease release emulator-5554')" deny "own"
+check "the refused chain keeps the lease" "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+check "a release fed through xargs is refused" \
+  "$(hook A 'echo emulator-5554 | xargs devlease release')" deny "own"
+check "the refused xargs release keeps the lease" \
+  "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+
+# The hook reads release's arguments the way the CLI does.
+check "release --help releases nothing" "$(hook A 'devlease release --help')" warn "no lease on --help"
+check "the lease survives release --help" "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+hook A 'devlease -v release emulator-5554' >/dev/null
+check "a flag before release is not a release" \
+  "$(hook B 'adb -s emulator-5554 shell ls')" deny "held by"
+
 # --- session end releases the ending session's leases ---
 session_end() {
   python3 -c '
@@ -152,7 +172,7 @@ reset
 hook A 'adb -s emulator-5554 shell ls' >/dev/null
 hook A 'adb -s emulator-5556 shell ls' >/dev/null
 hook B 'adb -s R58MSAMPLE01 shell ls' >/dev/null
-check "session end prints nothing" "$(session_end A)" allow
+[ -z "$(session_end A)" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: session end printed output"; }
 check "session end frees the session's leases" "$(hook C 'adb -s emulator-5554 shell ls')" allow
 check "session end frees every lease it held" "$(hook C 'adb -s emulator-5556 shell ls')" allow
 check "session end leaves other sessions' leases" \

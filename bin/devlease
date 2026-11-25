@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Serialize Android device access across concurrent agents.
 
-Hook mode reads a PreToolUse payload on stdin and allows, warns, or denies.
+Hook mode reads a PreToolUse payload on stdin and allows, warns, or denies; given
+a SessionEnd payload, it releases the ending session's leases.
 CLI mode (list/release/steal) is for agents and for you.
 """
 import json
@@ -296,9 +297,23 @@ def gate(cmd, cwd):
 
         # The CLI knows its session only from CLAUDE_CODE_SESSION_ID, which a Codex
         # shell does not set, so the hook, which gets session_id, does the release.
-        if name == "devlease" and subcommand(args) == "release":
-            rest = args[args.index("release") + 1:]
-            release(ME, next((a for a in rest if not a.startswith("-")), None))
+        # It runs before the command does, so a release chained after device work
+        # would free the device while that work still runs.
+        # ponytail: refuses every chain, `cd x && devlease release` included; narrow
+        # it to chains with a gated segment if that refusal gets in the way.
+        if name == "devlease" and args[:1] == ["release"]:
+            if len(parsed) > 1:
+                return "deny", (
+                    "Run `devlease release [serial]` as a command of its own. The hook "
+                    "releases before any of the command runs, so anything chained with "
+                    "it would run on a device you no longer hold."
+                )
+            target = args[1] if len(args) > 1 else None
+            freed = release(ME, target)
+            notices.append(
+                f"Released {', '.join(freed)}." if freed else
+                f"This session holds no lease{' on ' + target if target else 's'} to release."
+            )
             continue
 
         hit = matches(rules["denied"], text)
